@@ -16,6 +16,7 @@
  */
 
 #include <tayga.h>
+#include <sys/uio.h>
 
 extern struct config *gcfg;
 
