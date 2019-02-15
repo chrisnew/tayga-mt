@@ -191,41 +191,39 @@ static void signal_setup(void)
 static void read_from_tun(void)
 {
 	int ret;
-	struct tun_pi *pi = (struct tun_pi *)gcfg->recv_buf;
-	struct pkt pbuf, *p = &pbuf;
-
-	ret = read(gcfg->tun_fd, gcfg->recv_buf, gcfg->recv_buf_size);
+	struct pkt *p = (struct pkt *) malloc(sizeof(struct pkt) + gcfg->recv_buf_size);
+        
+	ret = read(gcfg->tun_fd, p->recv_buf, gcfg->recv_buf_size);
 	if (ret < 0) {
 		if (errno == EAGAIN)
-			return;
+			goto error_return;
 		slog(LOG_ERR, "received error when reading from tun "
 				"device: %s\n", strerror(errno));
-		return;
+		goto error_return;
 	}
 	if (ret < sizeof(struct tun_pi)) {
 		slog(LOG_WARNING, "short read from tun device "
 				"(%d bytes)\n", ret);
-		return;
+		goto error_return;
 	}
 	if (ret == gcfg->recv_buf_size) {
 		slog(LOG_WARNING, "dropping oversized packet\n");
-		return;
+		goto error_return;
 	}
+        
+        struct tun_pi *pi = (struct tun_pi *) p->recv_buf;
+        
 	memset(p, 0, sizeof(struct pkt));
-	p->data = gcfg->recv_buf + sizeof(struct tun_pi);
+	p->data = p->recv_buf + sizeof(struct tun_pi);
 	p->data_len = ret - sizeof(struct tun_pi);
-	switch (ntohs(pi->proto)) {
-	case ETH_P_IP:
-		handle_ip4(p);
-		break;
-	case ETH_P_IPV6:
-		handle_ip6(p);
-		break;
-	default:
-		slog(LOG_WARNING, "Dropping unknown proto %04x from "
-				"tun device\n", ntohs(pi->proto));
-		break;
-	}
+        p->proto = ntohs(pi->proto);
+        
+        queue_push(p);
+        return;
+        
+error_return:
+        free(p->recv_buf);
+        free(p);
 }
 
 static void read_from_signalfd(void)
@@ -337,6 +335,9 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
+
+        queue_init();
+        slog(LOG_INFO, "queue_init(): okay\n");
 
 	if (do_mktun || do_rmtun) {
 		use_stdout = 1;
@@ -535,7 +536,7 @@ int main(int argc, char **argv)
 	pollfds[0].events = POLLIN;
 	pollfds[1].fd = gcfg->tun_fd;
 	pollfds[1].events = POLLIN;
-
+        
 	for (;;) {
 		ret = poll(pollfds, 2, POOL_CHECK_INTERVAL * 1000);
 		if (ret < 0) {

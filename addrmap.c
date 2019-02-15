@@ -232,7 +232,7 @@ static struct cache_entry *cache_insert(const struct in_addr *addr4,
 	return c;
 }
 
-struct map4 *find_map4(const struct in_addr *addr4)
+static struct map4 *find_map4_unsafe(const struct in_addr *addr4)
 {
 	struct list_head *entry;
 	struct map4 *m;
@@ -245,7 +245,16 @@ struct map4 *find_map4(const struct in_addr *addr4)
 	return NULL;
 }
 
-struct map6 *find_map6(const struct in6_addr *addr6)
+struct map4 *find_map4(const struct in_addr *addr4)
+{
+    struct map4 *m;
+    queue_lock();
+    m = find_map4_unsafe(addr4);
+    queue_unlock();
+    return m;
+}
+
+static struct map6 *find_map6_unsafe(const struct in6_addr *addr6)
 {
 	struct list_head *entry;
 	struct map6 *m;
@@ -258,7 +267,16 @@ struct map6 *find_map6(const struct in6_addr *addr6)
 	return NULL;
 }
 
-int insert_map4(struct map4 *m, struct map4 **conflict)
+struct map6 *find_map6(const struct in6_addr *addr6)
+{
+    struct map6 *m;
+    queue_lock();
+    m = find_map6_unsafe(addr6);
+    queue_unlock();
+    return m;
+}
+
+static int insert_map4_unsafe(struct map4 *m, struct map4 **conflict)
 {
 	struct list_head *entry;
 	struct map4 *s;
@@ -280,7 +298,16 @@ conflict:
 	return -1;
 }
 
-int insert_map6(struct map6 *m, struct map6 **conflict)
+int insert_map4(struct map4 *m, struct map4 **conflict)
+{
+    int res;
+    queue_lock();
+    res = insert_map4_unsafe(m, conflict);
+    queue_unlock();
+    return res;
+}
+
+static int insert_map6_unsafe(struct map6 *m, struct map6 **conflict)
 {
 	struct list_head *entry, *insert_pos = NULL;
 	struct map6 *s;
@@ -304,6 +331,15 @@ conflict:
 	if (conflict)
 		*conflict = s;
 	return -1;
+}
+
+int insert_map6(struct map6 *m, struct map6 **conflict)
+{
+    int res;
+    queue_lock();
+    res = insert_map6_unsafe(m, conflict);
+    queue_unlock();
+    return res;
 }
 
 int append_to_prefix(struct in6_addr *addr6, const struct in_addr *addr4,
@@ -388,7 +424,7 @@ int append_to_prefix(struct in6_addr *addr6, const struct in_addr *addr4,
 	}
 }
 
-int map_ip4_to_ip6(struct in6_addr *addr6, const struct in_addr *addr4,
+static int map_ip4_to_ip6_unsafe(struct in6_addr *addr6, const struct in_addr *addr4,
 		struct cache_entry **c_ptr)
 {
 	uint32_t hash;
@@ -453,6 +489,16 @@ int map_ip4_to_ip6(struct in6_addr *addr6, const struct in_addr *addr4,
 	}
 
 	return 0;
+}
+
+int map_ip4_to_ip6(struct in6_addr *addr6, const struct in_addr *addr4,
+		struct cache_entry **c_ptr)
+{
+    int res;
+    queue_lock();
+    res = map_ip4_to_ip6_unsafe(addr6, addr4, c_ptr);
+    queue_unlock();
+    return res;
 }
 
 static int extract_from_prefix(struct in_addr *addr4,
@@ -527,7 +573,7 @@ static int extract_from_prefix(struct in_addr *addr4,
 	return validate_ip4_addr(addr4);
 }
 
-int map_ip6_to_ip4(struct in_addr *addr4, const struct in6_addr *addr6,
+static int map_ip6_to_ip4_unsafe(struct in_addr *addr4, const struct in6_addr *addr6,
 		struct cache_entry **c_ptr, int dyn_alloc)
 {
 	uint32_t hash;
@@ -598,6 +644,15 @@ int map_ip6_to_ip4(struct in_addr *addr4, const struct in6_addr *addr6,
 	}
 
 	return 0;
+}
+
+int map_ip6_to_ip4(struct in_addr *addr4, const struct in6_addr *addr6,
+		struct cache_entry **c_ptr, int dyn_alloc) {
+    int res = 0;
+    queue_lock();
+    res = map_ip6_to_ip4_unsafe(addr4, addr6, c_ptr, dyn_alloc);
+    queue_unlock();
+    return res;
 }
 
 static void report_ageout(struct cache_entry *c)

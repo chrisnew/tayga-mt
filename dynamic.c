@@ -357,7 +357,7 @@ static void write_to_file(struct dynamic_pool *pool)
 	}
 }
 
-void dynamic_maint(struct dynamic_pool *pool, int shutdown)
+static void dynamic_maint_unsafe(struct dynamic_pool *pool, int shutdown)
 {
 	struct list_head *entry, *next;
 	struct map_dynamic *d;
@@ -393,4 +393,11 @@ void dynamic_maint(struct dynamic_pool *pool, int shutdown)
 			gcfg->map_write_pending = 0;
 		}
 	}
+}
+
+void dynamic_maint(struct dynamic_pool *pool, int shutdown) 
+{
+    queue_lock();
+    dynamic_maint_unsafe(pool, shutdown);
+    queue_unlock();
 }

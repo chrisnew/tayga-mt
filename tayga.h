@@ -116,10 +116,12 @@ struct pkt {
 	struct ip6 *ip6;
 	struct ip6_frag *ip6_frag;
 	struct icmp *icmp;
+        uint16_t proto;
 	uint8_t data_proto;
 	uint8_t *data;
 	uint32_t data_len;
 	uint32_t header_len; /* inc IP hdr for v4 but excl IP hdr for v6 */
+        uint8_t recv_buf[];
 };
 
 enum {
@@ -282,3 +284,27 @@ void handle_ip6(struct pkt *p);
 /* tayga.c */
 void slog(int priority, const char *format, ...);
 void read_random_bytes(void *d, int len);
+
+/* queue.c */
+void queue_init(void);
+void queue_push(struct pkt *p);
+void queue_shutdown(void);
+void queue_lock(void);
+void queue_unlock(void);
+
+#define queue_lock()
+#define queue_unlock()
+
+static inline void *__debug_malloc(const char *fnc, size_t n) {
+    void *ptr = malloc(n);
+    slog(LOG_DEBUG, "malloc of %llu bytes in %s: %p\n", n, fnc, ptr);
+    return ptr;
+}
+
+static inline void __debug_free(const char *fnc, void *ptr) {
+    slog(LOG_DEBUG, "free of %p in %s\n", ptr, fnc);
+    free(ptr);
+}
+
+// #define malloc(size) __debug_malloc(__FUNCTION__, size)
+// #define free(ptr) __debug_free(__FUNCTION__, ptr)
