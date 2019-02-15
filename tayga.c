@@ -222,7 +222,6 @@ static void read_from_tun(void)
         return;
         
 error_return:
-        free(p->recv_buf);
         free(p);
 }
 
@@ -335,9 +334,6 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
-
-        queue_init();
-        slog(LOG_INFO, "queue_init(): okay\n");
 
 	if (do_mktun || do_rmtun) {
 		use_stdout = 1;
@@ -537,8 +533,11 @@ int main(int argc, char **argv)
 	pollfds[1].fd = gcfg->tun_fd;
 	pollfds[1].events = POLLIN;
         
+        queue_init();
+        slog(LOG_INFO, "queue_init(): okay\n");
+        
 	for (;;) {
-		ret = poll(pollfds, 2, POOL_CHECK_INTERVAL * 1000);
+		ret = poll(pollfds, 1, POOL_CHECK_INTERVAL * 1000);
 		if (ret < 0) {
 			if (errno == EINTR)
 				continue;
@@ -550,7 +549,8 @@ int main(int argc, char **argv)
 		if (pollfds[0].revents)
 			read_from_signalfd();
 		if (pollfds[1].revents)
-			read_from_tun();
+                        queue_notify();
+			//read_from_tun();
 		if (gcfg->cache_size && (gcfg->last_cache_maint +
 						CACHE_CHECK_INTERVAL < now ||
 					gcfg->last_cache_maint > now)) {

@@ -24,8 +24,10 @@
 #include <apr-1/apr_general.h>
 #include <apr-1/apr_thread_proc.h>
 
-#define QUEUE_SIZE      1024 * 1024
+#define QUEUE_SIZE      1024 * 1024 * 128
 #define QUEUE_WORKERS   8
+
+extern struct config *gcfg;
 
 static apr_queue_t *worker_queue;
 static apr_pool_t *mp;
@@ -46,18 +48,57 @@ static void queue_handle(struct pkt *p) {
                     "tun device\n", p->proto);
             break;
     }
-    
-    free(p);
+}
+
+static void read_from_tun(struct pkt *p) {
+    int ret;
+    // struct pkt *p = (struct pkt *) malloc(sizeof (struct pkt) + gcfg->recv_buf_size);
+
+    ret = read(gcfg->tun_fd, p->recv_buf, gcfg->recv_buf_size);
+    if (ret < 0) {
+        if (errno == EAGAIN)
+            goto error_return;
+        slog(LOG_ERR, "received error when reading from tun "
+                "device: %s\n", strerror(errno));
+        goto error_return;
+    }
+    if (ret < sizeof (struct tun_pi)) {
+        slog(LOG_WARNING, "short read from tun device "
+                "(%d bytes)\n", ret);
+        goto error_return;
+    }
+    if (ret == gcfg->recv_buf_size) {
+        slog(LOG_WARNING, "dropping oversized packet\n");
+        goto error_return;
+    }
+
+    struct tun_pi *pi = (struct tun_pi *) p->recv_buf;
+
+    memset(p, 0, sizeof (struct pkt));
+    p->data = p->recv_buf + sizeof (struct tun_pi);
+    p->data_len = ret - sizeof (struct tun_pi);
+    p->proto = ntohs(pi->proto);
+
+    queue_handle(p);
+    return;
+
+error_return:
+    return;
 }
 
 static void *APR_THREAD_FUNC doit(apr_thread_t *thd, void *data) {
+    struct pollfd pollfds[1];
+    
+    memset(pollfds, 0, sizeof(pollfds));
+    
+    pollfds[0].fd = gcfg->tun_fd;
+    pollfds[0].events = POLLIN;
+    
     while (1) {
-        struct pkt *p;
+        int ret = poll(pollfds, 1, POOL_CHECK_INTERVAL * 1000);
         
-        apr_status_t res = apr_queue_pop(worker_queue, (void **)&p);
-        
-        if (res == APR_SUCCESS && p) {
-            queue_handle(p);
+        if (pollfds[1].revents) {
+            read_from_tun((struct pkt *) data);
         }
     }
 
@@ -80,17 +121,23 @@ void queue_init(void) {
     apr_initialize();
     apr_pool_create(&mp, NULL);
 
-    apr_queue_create(&worker_queue, QUEUE_SIZE, mp);
+//    apr_queue_create(&worker_queue, QUEUE_SIZE, mp);
 
-    apr_thread_mutex_create(&mutex, APR_THREAD_MUTEX_NESTED, mp);
-    
+//    apr_thread_mutex_create(&mutex, APR_THREAD_MUTEX_NESTED, mp);
+
     apr_threadattr_create(&thd_attr, mp);
 
     for (int i = 0; i < QUEUE_WORKERS; i++) {
-        apr_thread_create(&thd_arr[i], thd_attr, doit, NULL, mp);
+        struct pkt *p = (struct pkt *) malloc(sizeof (struct pkt) + gcfg->recv_buf_size);
+        
+        apr_thread_create(&thd_arr[i], thd_attr, doit, p, mp);
     }
 }
 
 void queue_push(struct pkt *p) {
-    apr_queue_push (worker_queue, (void *)p);
+    apr_queue_push(worker_queue, (void *) p);
+}
+
+void queue_notify(void) {
+    apr_queue_push(worker_queue, NULL);
 }

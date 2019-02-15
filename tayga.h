@@ -291,6 +291,7 @@ void queue_push(struct pkt *p);
 void queue_shutdown(void);
 void queue_lock(void);
 void queue_unlock(void);
+void queue_notify(void);
 
 #define queue_lock()
 #define queue_unlock()
