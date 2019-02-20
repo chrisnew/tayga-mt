@@ -52,6 +52,11 @@ void slog(int priority, const char *format, ...)
 	va_end(ap);
 }
 
+static void tayga_shutdown(void)
+{
+	queue_shutdown();
+}
+
 static void set_nonblock(int fd)
 {
 	int flags;
@@ -59,11 +64,13 @@ static void set_nonblock(int fd)
 	flags = fcntl(fd, F_GETFL);
 	if (flags < 0) {
 		slog(LOG_CRIT, "fcntl F_GETFL returned %s\n", strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 	flags |= O_NONBLOCK;
 	if (fcntl(fd, F_SETFL, flags) < 0) {
 		slog(LOG_CRIT, "fcntl F_SETFL returned %s\n", strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 }
@@ -76,10 +83,12 @@ void read_random_bytes(void *d, int len)
 	if (ret < 0) {
 		slog(LOG_CRIT, "read /dev/urandom returned %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 	if (ret < len) {
 		slog(LOG_CRIT, "read /dev/urandom returned EOF\n");
+		tayga_shutdown();
 		exit(1);
 	}
 }
@@ -93,15 +102,17 @@ static void tun_setup(int do_mktun, int do_rmtun)
 	if (gcfg->tun_fd < 0) {
 		slog(LOG_CRIT, "Unable to open /dev/net/tun, aborting: %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TUN;
-	strcpy(ifr.ifr_name, gcfg->tundev);
+	strncpy(ifr.ifr_name, gcfg->tundev, sizeof(ifr.ifr_name));
 	if (ioctl(gcfg->tun_fd, TUNSETIFF, &ifr) < 0) {
 		slog(LOG_CRIT, "Unable to attach tun device %s, aborting: "
 				"%s\n", gcfg->tundev, strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 
@@ -110,18 +121,21 @@ static void tun_setup(int do_mktun, int do_rmtun)
 			slog(LOG_CRIT, "Unable to set persist flag on %s, "
 					"aborting: %s\n", gcfg->tundev,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		if (ioctl(gcfg->tun_fd, TUNSETOWNER, 0) < 0) {
 			slog(LOG_CRIT, "Unable to set owner on %s, "
 					"aborting: %s\n", gcfg->tundev,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		if (ioctl(gcfg->tun_fd, TUNSETGROUP, 0) < 0) {
 			slog(LOG_CRIT, "Unable to set group on %s, "
 					"aborting: %s\n", gcfg->tundev,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		slog(LOG_NOTICE, "Created persistent tun device %s\n",
@@ -132,6 +146,7 @@ static void tun_setup(int do_mktun, int do_rmtun)
 			slog(LOG_CRIT, "Unable to clear persist flag on %s, "
 					"aborting: %s\n", gcfg->tundev,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		slog(LOG_NOTICE, "Removed persistent tun device %s\n",
@@ -145,13 +160,15 @@ static void tun_setup(int do_mktun, int do_rmtun)
 	if (fd < 0) {
 		slog(LOG_CRIT, "Unable to create socket, aborting: %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 	memset(&ifr, 0, sizeof(ifr));
-	strcpy(ifr.ifr_name, gcfg->tundev);
+	strncpy(ifr.ifr_name, gcfg->tundev, sizeof(ifr.ifr_name));
 	if (ioctl(fd, SIOCGIFMTU, &ifr) < 0) {
 		slog(LOG_CRIT, "Unable to query MTU, aborting: %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 	close(fd);
@@ -174,6 +191,7 @@ static void signal_setup(void)
 	if (pipe(signalfds) < 0) {
 		slog(LOG_INFO, "unable to create signal pipe, aborting: %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 	set_nonblock(signalfds[0]);
@@ -188,43 +206,6 @@ static void signal_setup(void)
 	sigaction(SIGTERM, &act, NULL);
 }
 
-static void read_from_tun(void)
-{
-	int ret;
-	struct pkt *p = (struct pkt *) malloc(sizeof(struct pkt) + gcfg->recv_buf_size);
-        
-	ret = read(gcfg->tun_fd, p->recv_buf, gcfg->recv_buf_size);
-	if (ret < 0) {
-		if (errno == EAGAIN)
-			goto error_return;
-		slog(LOG_ERR, "received error when reading from tun "
-				"device: %s\n", strerror(errno));
-		goto error_return;
-	}
-	if (ret < sizeof(struct tun_pi)) {
-		slog(LOG_WARNING, "short read from tun device "
-				"(%d bytes)\n", ret);
-		goto error_return;
-	}
-	if (ret == gcfg->recv_buf_size) {
-		slog(LOG_WARNING, "dropping oversized packet\n");
-		goto error_return;
-	}
-        
-        struct tun_pi *pi = (struct tun_pi *) p->recv_buf;
-        
-	memset(p, 0, sizeof(struct pkt));
-	p->data = p->recv_buf + sizeof(struct tun_pi);
-	p->data_len = ret - sizeof(struct tun_pi);
-        p->proto = ntohs(pi->proto);
-        
-        queue_push(p);
-        return;
-        
-error_return:
-        free(p);
-}
-
 static void read_from_signalfd(void)
 {
 	int ret, sig;
@@ -236,15 +217,18 @@ static void read_from_signalfd(void)
 				return;
 			slog(LOG_CRIT, "got error %s from signalfd\n",
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		if (ret == 0) {
 			slog(LOG_CRIT, "signal fd was closed\n");
+			tayga_shutdown();
 			exit(1);
 		}
 		if (gcfg->dynamic_pool)
 			dynamic_maint(gcfg->dynamic_pool, 1);
 		slog(LOG_NOTICE, "exiting on signal %d\n", sig);
+		tayga_shutdown();
 		exit(0);
 	}
 }
@@ -253,7 +237,7 @@ int main(int argc, char **argv)
 {
 	int c, ret, longind;
 	int pidfd;
-	struct pollfd pollfds[2];
+	struct pollfd pollfds[1];
 	struct map6 *m6;
 	char addrbuf[INET6_ADDRSTRLEN];
 
@@ -291,6 +275,7 @@ int main(int argc, char **argv)
 				if (do_rmtun) {
 					fprintf(stderr, "Error: both --mktun "
 						"and --rmtun specified.\n");
+					tayga_shutdown();
 					exit(1);
 				}
 				do_mktun = 1;
@@ -298,11 +283,13 @@ int main(int argc, char **argv)
 				if (do_mktun) {
 					fprintf(stderr, "Error: both --mktun "
 						"and --rmtun specified.\n");
+					tayga_shutdown();
 					exit(1);
 				}
 				do_rmtun = 1;
 			} else if (longind == 2) {
 				fprintf(stderr, USAGE_TEXT, argv[0]);
+				tayga_shutdown();
 				exit(0);
 			}
 			break;
@@ -331,6 +318,7 @@ int main(int argc, char **argv)
 		default:
 			fprintf(stderr, "Try `%s --help' for more "
 					"information.\n", argv[0]);
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -340,16 +328,19 @@ int main(int argc, char **argv)
 		if (user) {
 			fprintf(stderr, "Error: cannot specify -u or --user "
 					"with mktun/rmtun operation\n");
+			tayga_shutdown();
 			exit(1);
 		}
 		if (group) {
 			fprintf(stderr, "Error: cannot specify -g or --group "
 					"with mktun/rmtun operation\n");
+			tayga_shutdown();
 			exit(1);
 		}
 		if (do_chroot) {
 			fprintf(stderr, "Error: cannot specify -r or --chroot "
 					"with mktun/rmtun operation\n");
+			tayga_shutdown();
 			exit(1);
 		}
 		read_config(conffile);
@@ -364,6 +355,7 @@ int main(int argc, char **argv)
 		pw = getpwnam(user);
 		if (!pw) {
 			slog(LOG_CRIT, "Error: user %s does not exist\n", user);
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -373,6 +365,7 @@ int main(int argc, char **argv)
 		if (!gr) {
 			slog(LOG_CRIT, "Error: group %s does not exist\n",
 					group);
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -383,6 +376,7 @@ int main(int argc, char **argv)
 		if (do_chroot) {
 			slog(LOG_CRIT, "Error: cannot chroot when no data-dir "
 					"is specified in %s\n", conffile);
+			tayga_shutdown();
 			exit(1);
 		}
 		chdir("/");
@@ -391,18 +385,21 @@ int main(int argc, char **argv)
 			slog(LOG_CRIT, "Error: unable to chdir to %s, "
 					"aborting: %s\n", gcfg->data_dir,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		if (mkdir(gcfg->data_dir, 0777) < 0) {
 			slog(LOG_CRIT, "Error: unable to create %s, aborting: "
 					"%s\n", gcfg->data_dir,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		if (chdir(gcfg->data_dir) < 0) {
 			slog(LOG_CRIT, "Error: created %s but unable to chdir "
 					"to it!?? (%s)\n", gcfg->data_dir,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -411,6 +408,7 @@ int main(int argc, char **argv)
 		slog(LOG_CRIT, "Error: chroot is ineffective without also "
 				"specifying the -u option to switch to an "
 				"unprivileged user\n");
+		tayga_shutdown();
 		exit(1);
 	}
 
@@ -420,6 +418,7 @@ int main(int argc, char **argv)
 			slog(LOG_CRIT, "Error, unable to open %s for "
 					"writing: %s\n", pidfile,
 					strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -427,6 +426,7 @@ int main(int argc, char **argv)
 	if (detach && daemon(1, 0) < 0) {
 		slog(LOG_CRIT, "Error, unable to fork and detach: %s\n",
 				strerror(errno));
+		tayga_shutdown();
 		exit(1);
 	}
 
@@ -443,6 +443,7 @@ int main(int argc, char **argv)
 		if (gcfg->urandom_fd < 0) {
 			slog(LOG_CRIT, "Unable to open /dev/urandom, "
 					"aborting: %s\n", strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		read_random_bytes(gcfg->rand, 8 * sizeof(uint32_t));
@@ -455,6 +456,7 @@ int main(int argc, char **argv)
 		if (chroot(gcfg->data_dir) < 0) {
 			slog(LOG_CRIT, "Unable to chroot to %s: %s\n",
 					gcfg->data_dir, strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		chdir("/");
@@ -466,6 +468,7 @@ int main(int argc, char **argv)
 				setgroups(1, &gr->gr_gid) < 0) {
 			slog(LOG_CRIT, "Error: cannot set gid to %d: %s\n",
 					gr->gr_gid, strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -475,6 +478,7 @@ int main(int argc, char **argv)
 				setreuid(pw->pw_uid, pw->pw_uid) < 0) {
 			slog(LOG_CRIT, "Error: cannot set uid to %d: %s\n",
 					pw->pw_uid, strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 	}
@@ -524,14 +528,13 @@ int main(int argc, char **argv)
 	if (!gcfg->recv_buf) {
 		slog(LOG_CRIT, "Error: unable to allocate %d bytes for "
 				"receive buffer\n", gcfg->recv_buf_size);
+		tayga_shutdown();
 		exit(1);
 	}
 
-	memset(pollfds, 0, 2 * sizeof(struct pollfd));
+	memset(pollfds, 0, sizeof(struct pollfd));
 	pollfds[0].fd = signalfds[0];
 	pollfds[0].events = POLLIN;
-	pollfds[1].fd = gcfg->tun_fd;
-	pollfds[1].events = POLLIN;
         
         queue_init();
         slog(LOG_INFO, "queue_init(): okay\n");
@@ -543,14 +546,12 @@ int main(int argc, char **argv)
 				continue;
 			slog(LOG_ERR, "poll returned error %s\n",
 			strerror(errno));
+			tayga_shutdown();
 			exit(1);
 		}
 		time(&now);
 		if (pollfds[0].revents)
 			read_from_signalfd();
-		if (pollfds[1].revents)
-                        queue_notify();
-			//read_from_tun();
 		if (gcfg->cache_size && (gcfg->last_cache_maint +
 						CACHE_CHECK_INTERVAL < now ||
 					gcfg->last_cache_maint > now)) {

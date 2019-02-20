@@ -24,14 +24,18 @@
 #include <apr-1/apr_general.h>
 #include <apr-1/apr_thread_proc.h>
 
-#define QUEUE_SIZE      1024 * 1024 * 128
+#define MAX_EVENTS      1
 #define QUEUE_WORKERS   8
 
-extern struct config *gcfg;
+extern struct config    *gcfg;
 
-static apr_queue_t *worker_queue;
-static apr_pool_t *mp;
-static apr_thread_mutex_t *mutex;
+static apr_thread_t     *thd_arr[QUEUE_WORKERS];
+static apr_threadattr_t *thd_attr;
+static struct pkt       *p[QUEUE_WORKERS];
+
+static apr_pool_t       *mp;
+
+static bool             is_running = false;
 
 static void queue_handle(struct pkt *p) {
     switch (p->proto) {
@@ -51,25 +55,27 @@ static void queue_handle(struct pkt *p) {
 }
 
 static void read_from_tun(struct pkt *p) {
-    int ret;
-    // struct pkt *p = (struct pkt *) malloc(sizeof (struct pkt) + gcfg->recv_buf_size);
+    int ret = read(gcfg->tun_fd, p->recv_buf, gcfg->recv_buf_size);
 
-    ret = read(gcfg->tun_fd, p->recv_buf, gcfg->recv_buf_size);
     if (ret < 0) {
-        if (errno == EAGAIN)
-            goto error_return;
+        if (errno == EAGAIN) {
+            return;
+        }
+
         slog(LOG_ERR, "received error when reading from tun "
                 "device: %s\n", strerror(errno));
-        goto error_return;
+        return;
     }
+
     if (ret < sizeof (struct tun_pi)) {
         slog(LOG_WARNING, "short read from tun device "
                 "(%d bytes)\n", ret);
-        goto error_return;
+        return;
     }
+
     if (ret == gcfg->recv_buf_size) {
         slog(LOG_WARNING, "dropping oversized packet\n");
-        goto error_return;
+        return;
     }
 
     struct tun_pi *pi = (struct tun_pi *) p->recv_buf;
@@ -80,13 +86,9 @@ static void read_from_tun(struct pkt *p) {
     p->proto = ntohs(pi->proto);
 
     queue_handle(p);
-    return;
-
-error_return:
-    return;
 }
 
-static void *APR_THREAD_FUNC doit(apr_thread_t *thd, void *data) {
+static void *APR_THREAD_FUNC queue_thread_handler(apr_thread_t *thd, void *data) {
     struct pollfd pollfds[1];
     
     memset(pollfds, 0, sizeof(pollfds));
@@ -94,50 +96,55 @@ static void *APR_THREAD_FUNC doit(apr_thread_t *thd, void *data) {
     pollfds[0].fd = gcfg->tun_fd;
     pollfds[0].events = POLLIN;
     
-    while (1) {
-        int ret = poll(pollfds, 1, POOL_CHECK_INTERVAL * 1000);
+    while (is_running) {
+        int ret = poll(pollfds, 1, 1000);
         
-        if (pollfds[1].revents) {
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            
+            slog(LOG_ERR, "poll returned error %s\n",
+            strerror(errno));
+            exit(1);
+        }
+        
+        if (pollfds[0].revents) {
             read_from_tun((struct pkt *) data);
         }
     }
+    
+    apr_thread_exit(thd, APR_SUCCESS);
 
     return NULL;
 }
 
-/*void queue_lock(void) {
-    apr_thread_mutex_lock(mutex);
-}
-
-void queue_unlock(void) {
-    apr_thread_mutex_unlock(mutex);
-}
- */
-
 void queue_init(void) {
-    apr_thread_t * thd_arr[QUEUE_WORKERS];
-    apr_threadattr_t *thd_attr;
-
     apr_initialize();
     apr_pool_create(&mp, NULL);
 
-//    apr_queue_create(&worker_queue, QUEUE_SIZE, mp);
-
-//    apr_thread_mutex_create(&mutex, APR_THREAD_MUTEX_NESTED, mp);
-
     apr_threadattr_create(&thd_attr, mp);
 
+    is_running = true;
+    
     for (int i = 0; i < QUEUE_WORKERS; i++) {
-        struct pkt *p = (struct pkt *) malloc(sizeof (struct pkt) + gcfg->recv_buf_size);
+        p[i] = (struct pkt *) malloc(sizeof (struct pkt) + gcfg->recv_buf_size);
         
-        apr_thread_create(&thd_arr[i], thd_attr, doit, p, mp);
+        apr_thread_create(&thd_arr[i], thd_attr, queue_thread_handler, p[i], mp);
     }
 }
 
-void queue_push(struct pkt *p) {
-    apr_queue_push(worker_queue, (void *) p);
-}
-
-void queue_notify(void) {
-    apr_queue_push(worker_queue, NULL);
+void queue_shutdown(void) {
+    if (!is_running) {
+        return;
+    }
+    
+    is_running = false;
+    
+    for (int i = 0; i < QUEUE_WORKERS; i++) {
+        apr_status_t status;
+        apr_thread_join(&status, thd_arr[i]);
+        
+        free(p[i]);
+    }
 }

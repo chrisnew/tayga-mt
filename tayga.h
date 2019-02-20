@@ -16,10 +16,12 @@
  */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -287,11 +289,7 @@ void read_random_bytes(void *d, int len);
 
 /* queue.c */
 void queue_init(void);
-void queue_push(struct pkt *p);
 void queue_shutdown(void);
-void queue_lock(void);
-void queue_unlock(void);
-void queue_notify(void);
 
 #define queue_lock()
 #define queue_unlock()

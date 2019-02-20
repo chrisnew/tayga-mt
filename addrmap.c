@@ -427,7 +427,7 @@ int append_to_prefix(struct in6_addr *addr6, const struct in_addr *addr4,
 static int map_ip4_to_ip6_unsafe(struct in6_addr *addr6, const struct in_addr *addr4,
 		struct cache_entry **c_ptr)
 {
-	uint32_t hash;
+	uint32_t hash = 0;
 	struct list_head *entry;
 	struct cache_entry *c;
 	struct map4 *map4;
